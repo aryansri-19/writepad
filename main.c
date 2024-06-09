@@ -15,6 +15,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <fcntl.h>
 
 /*Defines*/
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -22,6 +23,7 @@
 #define TAB_STOP 8
 
 enum keys {
+	BACKSPACE = 127,
 	ARROW_LEFT = 1000,
 	ARROW_RIGHT,
 	ARROW_UP,
@@ -54,6 +56,9 @@ struct editorConfig {
 	struct termios orig_termios;
 };
 struct editorConfig E;
+
+/*Implicit declaration*/
+void editorSetStatus(const char *fmt, ...);
 
 /*Terminal settings*/
 void die(const char* s) {
@@ -211,7 +216,25 @@ void editorAppendRows(char *s, size_t length) {
 	editorUpdateRows(&E.row[i]);
 	E.numRows++;
 }
+
+void editorInsertRowCharacters(wrow *row, int i, int c) {
+	if(i<0 || i > row->size) i = row->size;
+	row->characters = realloc(row->characters, row->size + 2);
+	memmove(&row->characters[i+1], &row->characters[i], row->size-i+1);
+	row->size++;
+	row->characters[i] = c;
+	editorUpdateRows(row);
+}
+
+void editorInsertCharacter(int c) {
+	if(E.cursorY == E.numRows) {
+		editorAppendRows("", 0);
+	}
+	editorInsertRowCharacters(&E.row[E.cursorY], E.cursorX, c);
+	E.cursorX++;
+}
 /*I/O*/
+
 void editorOpen(char *filename) {
 	free(E.file);
 	E.file = strdup(filename);
@@ -228,6 +251,48 @@ void editorOpen(char *filename) {
   	}
 	free(line);
 	fclose(fp);
+}
+
+
+char *editorRowsToSingleString(int *buffer_length) {
+	int total_length = 0;
+	int j;
+	for(j=0;j<E.numRows;j++) {
+		total_length += E.row[j].size + 1;
+	}
+	*buffer_length = total_length;
+
+	char *buffer = malloc(total_length);
+	char *p = buffer;
+	for(j=0;j<E.numRows;j++) {
+		memcpy(p, E.row[j].characters, E.row[j].size);
+		p += E.row[j].size;
+		*p = '\n';
+		p++;
+	}
+	return buffer;
+}
+
+void editorSave() {
+	if(E.file == NULL)
+		return;
+	
+	int length;
+	char *buffer = editorRowsToSingleString(&length);
+	int fd = open(E.file, O_RDWR | O_CREAT, 0644);
+	if(fd != -1) {
+		if(ftruncate(fd, length) != 1) {
+			if(write(fd, buffer, length) == length) {
+				close(fd);
+				free(buffer);
+				editorSetStatus("%d bytes written to disk", length);
+				return;
+			}
+		}
+		close(fd);
+	}
+	free(buffer);
+	editorSetStatus("Could not write. I/O error: %s", strerror(errno));
 }
 /*Global buffer*/
 struct append_buffer {
@@ -291,12 +356,17 @@ void editorMoveCursor(int key) {
 void editorProcessKeyPress() {
 	int c = editorReadKey();
 	switch(c) {
+		case '\r':
+			break;
 		case CTRL_KEY('x'):
 			write(STDOUT_FILENO, "\x1b[2J", 4);
 			write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
 			break;
-		
+		case CTRL_KEY('s'):
+			editorSave();
+			break;
+
 		case HOME:
 			E.cursorX = 0;
 			break;
@@ -326,6 +396,19 @@ void editorProcessKeyPress() {
 		case ARROW_DOWN:
 		case ARROW_RIGHT:
 			editorMoveCursor(c);
+			break;
+		
+		case BACKSPACE:
+		case CTRL_KEY('h'):
+		case DELETE:
+			break;
+		
+		case CTRL_KEY('l'):
+		case '\x1b':
+			break;
+
+		default: 
+			editorInsertCharacter(c);
 			break;
 	}
 }
@@ -391,7 +474,7 @@ void editorDrawStatusBar(struct append_buffer *ab) {
 	char status[80], rStatus[80];
 	int length = snprintf(status, sizeof(status), "%.20s - %d lines", E.file ? E.file : "[No file]", E.numRows);
 	int rLength = snprintf(rStatus, sizeof(rStatus), "%d/%d", E.cursorY + 1, E.numRows);
-	if(length < E.screenColumns) length = E.screenColumns;
+	if(length > E.screenColumns) length = E.screenColumns;
 	aBufferAppend(ab, status, length);
 	while(length < E.screenColumns) {
 		if(E.screenColumns - length == rLength) {
@@ -464,7 +547,7 @@ int main(int argc, char *argv[]) {
 	if(argc >= 2) {
 		editorOpen(argv[1]);
 	}
-	editorSetStatus("HELP: Ctrl-X to exit");
+	editorSetStatus("HELP: Ctrl-X to exit | Ctrl-S to save | Ctrl-F to find");
 	while (1) {
 		editorRefreshScreen();
 		editorProcessKeyPress();
